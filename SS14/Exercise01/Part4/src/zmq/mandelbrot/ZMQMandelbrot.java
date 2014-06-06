@@ -34,19 +34,23 @@ import org.zeromq.ZMQ.Poller;
  */
 public class ZMQMandelbrot {
 
-    static ZMQ.Context ctx;
-    static boolean end = false;
+    static ZMQ.Context ctx;             //!< Global ZMQ context (initialized in main())
     
-    static float pixelWidth = 1.f,
-                pixelHeight = 1.f;
+    static float    pixelWidth = 1.f,   //!< Coordinate-space horizontal sample size (for multisampling)
+                    pixelHeight = 1.f;  //!< Coordinate-space vertical sample size
+    
+    static int      resX = 2500,   //!< Horizontal image resolution in pixels
+                    resY;          //!< Vertical image resolution in pixels (derived in main())
+    static float    minX = -2.f,   //!< Horizontal minimum coordinate
+                    maxX = 1.f,    //!< Horizontal maximum coordinate
+                    minY = -1.2f,  //!< Vertical minimum coordinate
+                    maxY = 1.2f;   //!< Vertical maximum coordinate
     
     
-    static void fatal(String msg)
-    {
-        
-    
-    }
-    
+    /**
+     * Prints a byte array to the console
+     * @param data Array to print
+     */
     static void dump(byte[] data)
     {
         System.out.print(data.length+"_{");
@@ -55,34 +59,32 @@ public class ZMQMandelbrot {
         System.out.println("}");
     }
     
-    public static int getInt(byte[] b, int offset) 
-    {
-        int value = 0;
-        for (int i = 0; i < 4; i++) {
-            int shift = (4 - 1 - i) * 8;
-            value += (b[i+offset] & 0x000000FF) << shift;
-        }
-        return value;
-    }
-    public static void putInt(int a, byte[] ret, int offset)
-    {
-        //byte[] ret = new byte[4];
-        ret[offset+0] = (byte) (a & 0xFF);   
-        ret[offset+1] = (byte) ((a >> 8) & 0xFF);   
-        ret[offset+2] = (byte) ((a >> 16) & 0xFF);   
-        ret[offset+3] = (byte) ((a >> 24) & 0xFF);
-    }
-    
+    /**
+     * Custom output stream used for fast resettable stream output
+     */
     public static class MyOutputStream extends OutputStream {
         
         private byte[] data;
         private int writingAt = 0;
+        
+        /**
+         * Initializes a new object using the specified number of bytes
+         * @param size Size of the internal buffer in bytes
+         */
         public MyOutputStream(int size)
         {
             data = new byte[size];
         }
+        /**
+         * Allows to reset the buffer to a specific byte address within the buffer.
+         * @param offset Byte offset to continue writing from, relative to the beginning of the buffer (0 = first byte)
+         */
         public void     resetTo(int offset) {writingAt = offset; assert(writingAt >= 0 && writingAt < data.length);}
 
+        /**
+         * Pushes the entire local data onto the specified ZMQ socket
+         * @param s Socket to write to.
+         */
         public void     write(Socket s)
         {
             //dump(data);
@@ -90,44 +92,39 @@ public class ZMQMandelbrot {
         }
         
         @Override
-        public void	close() {};
-        @Override
-        public void	flush() {};
-        @Override
-        public void	write(byte[] b)
-        {
-            System.out.print("writing raw ");
-            dump(b);
-            for (int i = 0; i < b.length && writingAt < data.length; i++)
-                data[writingAt++] = b[i];
-        }
-        @Override
-        public void	write(byte[] b, int off, int len)
-        {
-            System.out.print("writing offsetted "+off);
-            dump(b);
-            
-            for (int i = 0; i < len && writingAt < data.length; i++)
-                data[writingAt++] = b[off + i];
-        }
-        @Override
         public void	write(int b)
         {
-            //System.out.println("writing byte "+b);
             data[writingAt++] = (byte)b;
         }
     }
     
+    /**
+     * Custom input stream used for fast resettable stream input
+     */
     public static class MyInputStream extends InputStream {
         
         private byte[] data;
         private int readingAt = 0;
+        
+        
+        /**
+         * Initializes a new object using the specified number of bytes
+         * @param size Size of the internal buffer in bytes
+         */
         public MyInputStream(int size)
         {
             data = new byte[size];
         }
-        
+
+        /**
+         * Resets buffer output to the first byte
+         */
         public void     resetToBeginning() {readingAt = 0;}
+        
+        /**
+         * Fills the entire local buffer from the specified ZMQ socket
+         * @param s Socket to read from
+         */
         public void     fill(Socket s)
         {
             int rc = s.recv(data,0,data.length,0);
@@ -139,65 +136,42 @@ public class ZMQMandelbrot {
         
         @Override
         public int	available() {
-            System.out.println("requested available data at "+(data.length - readingAt));
             return data.length - readingAt;
         }
         @Override
-        public void	close() {System.out.println("close"); }
-        @Override
-        public void	mark(int readlimit)
-        {System.out.println("mark"); }
-        @Override
-        public boolean	markSupported() {System.out.println("requested mark"); return false;}
-        @Override
-        public int	read()  {
-            System.out.println("read(),"+readingAt+"/"+data.length);
+        public int	read() throws EOFException  {
+            if (readingAt >= data.length)
+                throw new EOFException();
             byte rs = data[readingAt++];
-            System.out.println("read(),"+readingAt+"/"+data.length+"="+rs);
             return (int) rs;
         }
         
+        /**
+         * Reads a single 4-byte integer from the local buffer at the current read-address. Advances the read-address by 4 bytes
+         * @return Decoded integer
+         * @throws EOFException 
+         */
         public int      readInt() throws EOFException
         {
             if (readingAt+4 > data.length)
                 throw new EOFException();
-            return data[readingAt++] << 24 | (data[readingAt++] & 0xFF) << 16 | (data[readingAt++] & 0xFF) << 8 | (data[readingAt++] & 0xFF);
+            return    (int)data[readingAt++] << 24 
+                    | (int)(data[readingAt++]&0xFF) << 16 
+                    | (int)(data[readingAt++]&0xFF) << 8 
+                    | (int)(data[readingAt++]&0xFF);
         }
         
+        /**
+         * Reads a single 4-byte floating point value from the local buffer at the current read-address. Advances the read-address by 4 bytes
+         * @return
+         * @throws EOFException 
+         */
         public float    readFloat() throws EOFException
         {
             return Float.intBitsToFloat(readInt());
         }
         
         
-        @Override
-        public int	read(byte[] b)
-        {
-            System.out.println("read field"); 
-            int written = 0;
-                 
-            for (int i = 0; i+readingAt < data.length && i < b.length; i++)
-            {
-                b[i] = data[readingAt+i];
-                written++;
-            }
-            readingAt += written;
-            return written;
-        }
-        @Override
-        public int	read(byte[] b, int off, int len)
-        {
-            System.out.println("read offsetted field"); 
-            int written = 0;
-                 
-            for (int i = 0; i+readingAt < data.length && i < len; i++)
-            {
-                b[off + i] = data[readingAt+i];
-                written++;
-            }
-            readingAt += written;
-            return written;
-        }
                 
         @Override
         public long	skip(long n)
@@ -208,7 +182,11 @@ public class ZMQMandelbrot {
             return skp;
         }
     }
-    
+
+    /**
+     * Calculation worker thread.
+     * Any number of worker objects may be created, although in practice there should not be more than processor cores available.
+     */
     public static class Worker extends Thread
     {
 
@@ -244,15 +222,9 @@ public class ZMQMandelbrot {
             return iteration;
         }
    
-        private static void color(int iterations, int maxIterations, float[] rgb)
-        {
-            float linear = (float)iterations / (float)maxIterations;
-            rgb[0] = linear;
-            rgb[1] = linear;
-            rgb[2] = linear;
-        }
         
-         public void run() {
+        @Override
+        public void run() {
              Socket pull = ctx.socket(ZMQ.PULL),
                      push = ctx.socket(ZMQ.PUSH);
             pull.connect("inproc://workIn");
@@ -270,11 +242,10 @@ public class ZMQMandelbrot {
              
                 //System.out.println("working ...");
             int cnt = 0;
-            while (!end)
+            for (;;)
             {
                 //int rc = pull.recv(data,8,0,0);
                 stream.fill(pull);
-                 if (!end)
                  {
                      cnt ++;
                      /*
@@ -298,7 +269,7 @@ public class ZMQMandelbrot {
                                  {
                                      float fx = (float)sx / (float)numSamples * pixelWidth;
                                      float fy = (float)sy / (float)numSamples * pixelHeight;
-                                     rs +=  iterate(x + fx, y + fy, 1000);
+                                     rs +=  iterate(x + fx, y + fy, 100);
                                  }
                              
                              
@@ -306,7 +277,7 @@ public class ZMQMandelbrot {
                              outStream.resetTo(0);
                              psh.writeFloat(x);
                              psh.writeFloat(y);
-                             psh.writeFloat((float)(rs) / (float)(numSamples*numSamples) / 1000.f);
+                             psh.writeFloat((float)(rs) / (float)(numSamples*numSamples) / 100.f);
                              psh.flush();
                              outStream.write(push);
                          } catch (IOException ex) {
@@ -321,25 +292,27 @@ public class ZMQMandelbrot {
     
     }
     
+    /**
+     * Calculates the linear interpolation between @a v0 and @a v1 at @a x
+     * @param v0 Lower value to interpolate between
+     * @param v1 Upper value to interpolate between
+     * @param x Linear location in the range [0,1]
+     * @return Linear interpolation
+     */
     public static float lerp(float v0, float v1, float x)
     {
         return v0 + (v1 - v0) * x;
     }
     
+    /**
+     * Reader thread used to collect calculation results and fill them into an image for output.
+     * 
+     * Only one instance may be created of this class
+     */
     public static class Reader extends Thread
     {
-        int resX,resY;
-        float minX,maxX,minY,maxY;
-        public Reader(int resX, int resY, float minX, float maxX, float minY, float maxY)
-        {
-            this.resX = resX;
-            this.resY = resY;
-            this.minX = minX;
-            this.maxX = maxX;
-            this.minY = minY;
-            this.maxY = maxY;
-        }
         
+        @Override
         public void run() {
             Socket pull = ctx.socket(ZMQ.PULL);
             pull.bind("inproc://workOut");
@@ -373,7 +346,8 @@ public class ZMQMandelbrot {
                     int x = (int)Math.round((fx - minX) / (maxX - minX) * (resX-1));
                     int y = (int)Math.round((fy - minY) / (maxY - minY) * (resY-1));
 
-                    float rel = (float)Math.log(1.f + it * 4.f);
+                    float rel = it;
+                            //(float)Math.log(1.f + it * 4.f);
                             //(float)Math.sqrt(it);
                     
                     //rel = (float)Math.sqrt(rel);
@@ -410,6 +384,13 @@ public class ZMQMandelbrot {
     }
     
     
+    /**
+     * Converts a floating point RGB color into a byte-encoded integer value for image output
+     * @param r Red component in the range [0,1]
+     * @param g Green component in the range [0,1]
+     * @param b Blue component in the range [0,1]
+     * @return Integer-encoded color value
+     */
     public static int colorToRGB(float r, float g, float b)
     {
         int red = (int)(Math.max(0.f,Math.min(r,1.f)) * 255.f);
@@ -422,15 +403,8 @@ public class ZMQMandelbrot {
      * @param args the command line arguments
      */
     public static void main(String[] args) throws IOException, InterruptedException {
-        int resX = 2500;
-        float minX = -2.f;
-        float maxX = 1.f;
-        float minY = -1.2f;
-        float maxY = 1.2f;
         
-
-
-        int resY = (int)Math.round((double)resX * (maxY - minY) / (maxX - minX));
+        resY = (int)Math.round((double)resX * (maxY - minY) / (maxX - minX));
         
         
         
@@ -444,18 +418,15 @@ public class ZMQMandelbrot {
         
         System.out.println("creating workers...");
 
-        //Worker workers[] = new Worker[2];
         Worker workers[] = new Worker[4];
         for (int i = 0; i < workers.length; i++)
         {
             workers[i] = new Worker();
             workers[i].start();
         }
-        Reader reader = new Reader(resX,resY,(float)minX,(float)maxX,(float)minY,(float)maxY);
+        Reader reader = new Reader();
         reader.start();
         
-        float aspect = (float)resX / (float)resY;
-        //byte[] pack = new byte[8];
         System.out.println("issuing instructions...");
         MyOutputStream pushData = new MyOutputStream(8);
         DataOutputStream psh = new DataOutputStream(pushData);
@@ -471,7 +442,6 @@ public class ZMQMandelbrot {
             {
                 float fy = (float)((float)y / (float)(resY-1) * (maxY - minY) + minY);
                 
-                //System.out.println("sending pixel "+fx+", "+fy+" ...");
                 pushData.resetTo(4);
                 psh.writeFloat(fy);
                 psh.flush();
@@ -479,7 +449,6 @@ public class ZMQMandelbrot {
                 pushData.write(push);
                 numPixels++;
             }
-            //System.out.println("processing col "+x);
         }
         
         reader.join();
